@@ -15,10 +15,10 @@ import (
 	"github.com/pion/sdp/v3"
 	"github.com/pion/webrtc/v4"
 
-	internalwebrtc "github.com/glimesh/broadcast-box/internal/webrtc"
+	internalwebrtc "broadcast-box/internal/webrtc"
 )
 
-func Run(whepHandler func(res http.ResponseWriter, req *http.Request)) error {
+func Run(whepConnectHandler func(res http.ResponseWriter, req *http.Request)) error {
 	m := &webrtc.MediaEngine{}
 	if err := internalwebrtc.PopulateMediaEngine(m); err != nil {
 		return err
@@ -57,11 +57,16 @@ func Run(whepHandler func(res http.ResponseWriter, req *http.Request)) error {
 		}
 	})
 
-	req := httptest.NewRequest("POST", "/api/whip", strings.NewReader(offer.SDP))
+	req := httptest.NewRequest("GET", "/api/whip", strings.NewReader(offer.SDP))
 	req.Header["Authorization"] = []string{"Bearer networktest"}
+	req.Header["Upgrade"] = []string{"websocket"}
+	req.Header["Connection"] = []string{"upgrade"}
+	req.Header["Sec-Websocket-Version"] = []string{"13"}
+	req.Header["Sec-Websocket-Key"] = []string{"x3JJHMbDL1EzLkh9GBhXDw=="}
+
 	recorder := httptest.NewRecorder()
 
-	whepHandler(recorder, req)
+	whepConnectHandler(recorder, req)
 	res := recorder.Result()
 
 	if res.StatusCode != 201 {

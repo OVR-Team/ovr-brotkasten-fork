@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"github.com/pion/dtls/v3/pkg/crypto/elliptic"
 	"github.com/pion/ice/v3"
 	"github.com/pion/interceptor"
@@ -38,7 +39,8 @@ type (
 
 		firstSeenEpoch uint64
 
-		videoTracks []*videoTrack
+		sourceVideoTracksLock sync.RWMutex
+		sourceVideoTracks     map[string]*sourceVideoTrack
 
 		audioTrack           *webrtc.TrackLocalStaticRTP
 		audioPacketsReceived atomic.Uint64
@@ -50,15 +52,29 @@ type (
 
 		whepSessionsLock sync.RWMutex
 		whepSessions     map[string]*whepSession
+
+		whipSessionLock sync.RWMutex
+		whipSession     *whipSession
 	}
 
-	videoTrack struct {
+	sourceVideoTrack struct {
+		streamId       string
+		name           string //equals to track streamID
+		rtpVideoTracks []*rtpVideoTrack
+	}
+
+	rtpVideoTrack struct {
 		rid              string
 		packetsReceived  atomic.Uint64
 		lastKeyFrameSeen atomic.Value
 	}
 
 	videoTrackCodec int
+
+	socketConstraints struct {
+		socket *websocket.Conn
+		mu     sync.Mutex
+	}
 )
 
 var (
@@ -67,8 +83,72 @@ var (
 	apiWhip, apiWhep *webrtc.API
 
 	// nolint
-	videoRTCPFeedback = []webrtc.RTCPFeedback{{"goog-remb", ""}, {"ccm", "fir"}, {"nack", ""}, {"nack", "pli"}}
+	videoRTCPFeedback = []webrtc.RTCPFeedback{{Type: "goog-remb", Parameter: ""}, {Type: "ccm", Parameter: "fir"}, {Type: "nack", Parameter: ""}, {Type: "nack", Parameter: "pli"}}
 )
+
+type WebsocketMessage struct {
+	MessageType string                    `json:"messageType"`
+	Sdp         webrtc.SessionDescription `json:"sdp"`
+	Candidate   *webrtc.ICECandidate      `json:"candidate"`
+	Change      string                    `json:"change"`
+}
+
+//type customLogger struct{}
+//
+//func (c customLogger) Trace(string)                  {}
+//func (c customLogger) Tracef(string, ...interface{}) {}
+//
+//func (c customLogger) Debug(msg string) { fmt.Printf("customLogger Debug: %s\n", msg) }
+//func (c customLogger) Debugf(format string, args ...interface{}) {
+//	c.Debug(fmt.Sprintf(format, args...))
+//}
+//func (c customLogger) Info(msg string) { fmt.Printf("customLogger Info: %s\n", msg) }
+//func (c customLogger) Infof(format string, args ...interface{}) {
+//	c.Trace(fmt.Sprintf(format, args...))
+//}
+//func (c customLogger) Warn(msg string) { fmt.Printf("customLogger Warn: %s\n", msg) }
+//func (c customLogger) Warnf(format string, args ...interface{}) {
+//	c.Warn(fmt.Sprintf(format, args...))
+//}
+//func (c customLogger) Error(msg string) { fmt.Printf("customLogger Error: %s\n", msg) }
+//func (c customLogger) Errorf(format string, args ...interface{}) {
+//	c.Error(fmt.Sprintf(format, args...))
+//}
+//
+//type customLoggerFactory struct{}
+//
+//func (c customLoggerFactory) NewLogger(subsystem string) logging.LeveledLogger {
+//	fmt.Printf("Creating logger for %s \n", subsystem)
+//	return customLogger{}
+//}
+
+func doSignaling(peerConnection *webrtc.PeerConnection, offer webrtc.SessionDescription, socketConstraints *socketConstraints) {
+	if err := peerConnection.SetRemoteDescription(offer); err != nil {
+		panic(err)
+	}
+
+	maybePrintOfferAnswer(appendAnswer(peerConnection.RemoteDescription().SDP), true)
+
+	answer, answerErr := peerConnection.CreateAnswer(nil)
+	if answerErr != nil {
+		panic(answerErr)
+	}
+
+	if err := peerConnection.SetLocalDescription(answer); err != nil {
+		panic(err)
+	}
+
+	maybePrintOfferAnswer(appendAnswer(peerConnection.LocalDescription().SDP), false)
+
+	message := &WebsocketMessage{}
+
+	message.MessageType = "sdp"
+	message.Sdp = answer
+
+	if err := socketConstraints.sendSocket(message); err != nil {
+		panic(err)
+	}
+}
 
 func getVideoTrackCodec(in string) videoTrackCodec {
 	downcased := strings.ToLower(in)
@@ -103,6 +183,7 @@ func getStream(streamKey string, forWHIP bool) (*stream, error) {
 			whipActiveContext:       whipActiveContext,
 			whipActiveContextCancel: whipActiveContextCancel,
 			firstSeenEpoch:          uint64(time.Now().Unix()),
+			sourceVideoTracks:       map[string]*sourceVideoTrack{},
 		}
 		streamMap[streamKey] = foundStream
 	}
@@ -130,7 +211,9 @@ func peerConnectionDisconnected(streamKey string, whepSessionId string) {
 		delete(stream.whepSessions, whepSessionId)
 	} else {
 		stream.hasWHIPClient.Store(false)
-		stream.videoTracks = nil
+		for _, track := range stream.sourceVideoTracks {
+			track.rtpVideoTracks = nil
+		}
 	}
 
 	// Only delete stream if all WHEP Sessions are gone and have no WHIP Client
@@ -142,28 +225,46 @@ func peerConnectionDisconnected(streamKey string, whepSessionId string) {
 	delete(streamMap, streamKey)
 }
 
-func addTrack(stream *stream, rid string) (*videoTrack, error) {
+func addSourceTrack(stream *stream, name string, streamId string) (*sourceVideoTrack, error) {
 	streamMapLock.Lock()
 	defer streamMapLock.Unlock()
 
-	for i := range stream.videoTracks {
-		if rid == stream.videoTracks[i].rid {
-			return stream.videoTracks[i], nil
+	for _, track := range stream.sourceVideoTracks {
+		if streamId == track.streamId {
+			return track, nil
 		}
 	}
 
-	t := &videoTrack{rid: rid}
+	t := &sourceVideoTrack{name: name, streamId: streamId}
+	stream.sourceVideoTracks[name] = t
+	return t, nil
+}
+
+func addRIDTrack(sourceVideoTrack *sourceVideoTrack, rid string) (*rtpVideoTrack, error) {
+	streamMapLock.Lock()
+	defer streamMapLock.Unlock()
+
+	for _, track := range sourceVideoTrack.rtpVideoTracks {
+		if rid == track.rid {
+			return track, nil
+		}
+	}
+
+	t := &rtpVideoTrack{rid: rid}
 	t.lastKeyFrameSeen.Store(time.Time{})
-	stream.videoTracks = append(stream.videoTracks, t)
+	sourceVideoTrack.rtpVideoTracks = append(sourceVideoTrack.rtpVideoTracks, t)
 	return t, nil
 }
 
 func getPublicIP() string {
+	log.Println("getPublicIP")
 	req, err := http.Get("http://ip-api.com/json/")
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer req.Body.Close()
+
+	log.Println("getPublicIP", req)
 
 	body, err := io.ReadAll(req.Body)
 	if err != nil {
@@ -184,7 +285,7 @@ func getPublicIP() string {
 	return ip.Query
 }
 
-func createSettingEngine(isWHIP bool, udpMuxCache map[int]*ice.MultiUDPMuxDefault, tcpMuxCache map[string]ice.TCPMux) (settingEngine webrtc.SettingEngine) {
+func CreateSettingEngine(isWHIP bool, udpMuxCache map[int]*ice.MultiUDPMuxDefault, tcpMuxCache map[string]ice.TCPMux) (settingEngine webrtc.SettingEngine) {
 	var (
 		NAT1To1IPs []string
 		udpMuxPort int
@@ -283,7 +384,7 @@ func PopulateMediaEngine(m *webrtc.MediaEngine) error {
 	for _, codec := range []webrtc.RTPCodecParameters{
 		{
 			// nolint
-			RTPCodecCapability: webrtc.RTPCodecCapability{webrtc.MimeTypeOpus, 48000, 2, "minptime=10;useinbandfec=1", nil},
+			RTPCodecCapability: webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeOpus, ClockRate: 48000, Channels: 2, SDPFmtpLine: "minptime=10;useinbandfec=1", RTCPFeedback: nil},
 			PayloadType:        111,
 		},
 	} {
@@ -336,16 +437,25 @@ func PopulateMediaEngine(m *webrtc.MediaEngine) error {
 	return nil
 }
 
-func newPeerConnection(api *webrtc.API) (*webrtc.PeerConnection, error) {
+func NewPeerConnection(api *webrtc.API) (*webrtc.PeerConnection, error) {
 	cfg := webrtc.Configuration{}
+	log.Println("NewPeerConnection", cfg)
 
-	if stunServers := os.Getenv("STUN_SERVERS"); stunServers != "" {
-		for _, stunServer := range strings.Split(stunServers, "|") {
-			cfg.ICEServers = append(cfg.ICEServers, webrtc.ICEServer{
-				URLs: []string{"stun:" + stunServer},
-			})
-		}
-	}
+	cfg.ICEServers = append(cfg.ICEServers, webrtc.ICEServer{
+		URLs: []string{},
+		//Username:   "user-1",
+		//Credential: "pass-1",
+	})
+
+	//if stunServers := os.Getenv("STUN_SERVERS"); stunServers != "" {
+	//	for _, stunServer := range strings.Split(stunServers, "|") {
+	//		cfg.ICEServers = append(cfg.ICEServers, webrtc.ICEServer{
+	//			URLs:       []string{stunServer},
+	//			Username:   "user-1",
+	//			Credential: "pass-1",
+	//		})
+	//	}
+	//}
 
 	return api.NewPeerConnection(cfg)
 }
@@ -390,33 +500,45 @@ func Configure() {
 	apiWhip = webrtc.NewAPI(
 		webrtc.WithMediaEngine(mediaEngine),
 		webrtc.WithInterceptorRegistry(interceptorRegistry),
-		webrtc.WithSettingEngine(createSettingEngine(true, udpMuxCache, tcpMuxCache)),
+		webrtc.WithSettingEngine(CreateSettingEngine(true, udpMuxCache, tcpMuxCache)),
 	)
 
 	apiWhep = webrtc.NewAPI(
 		webrtc.WithMediaEngine(mediaEngine),
 		webrtc.WithInterceptorRegistry(interceptorRegistry),
-		webrtc.WithSettingEngine(createSettingEngine(false, udpMuxCache, tcpMuxCache)),
+		webrtc.WithSettingEngine(CreateSettingEngine(false, udpMuxCache, tcpMuxCache)),
 	)
 }
 
-type StreamStatusVideo struct {
+type SourceStreamStatusVideo struct {
+	ID              string                 `json:"id"`
+	RTPVideoStreams []RTPStreamStatusVideo `json:"rtpVideoStreams"`
+}
+
+type RTPStreamStatusVideo struct {
 	RID              string    `json:"rid"`
 	PacketsReceived  uint64    `json:"packetsReceived"`
 	LastKeyFrameSeen time.Time `json:"lastKeyFrameSeen"`
 }
 
 type StreamStatus struct {
-	StreamKey            string              `json:"streamKey"`
-	FirstSeenEpoch       uint64              `json:"firstSeenEpoch"`
-	AudioPacketsReceived uint64              `json:"audioPacketsReceived"`
-	VideoStreams         []StreamStatusVideo `json:"videoStreams"`
-	WHEPSessions         []whepSessionStatus `json:"whepSessions"`
+	StreamKey            string                    `json:"streamKey"`
+	FirstSeenEpoch       uint64                    `json:"firstSeenEpoch"`
+	AudioPacketsReceived uint64                    `json:"audioPacketsReceived"`
+	SourceVideoStreams   []SourceStreamStatusVideo `json:"sourceVideoStreams"`
+	WHEPSessions         []whepSessionStatus       `json:"whepSessions"`
 }
 
 type whepSessionStatus struct {
-	ID             string `json:"id"`
-	CurrentLayer   string `json:"currentLayer"`
+	ID             string              `json:"id"`
+	CurrentLayer   string              `json:"currentLayer"`
+	VideoOutputs   []videoOutputStatus `json:"videoOutputs"`
+	SequenceNumber uint16              `json:"sequenceNumber"`
+	Timestamp      uint32              `json:"timestamp"`
+	PacketsWritten uint64              `json:"packetsWritten"`
+}
+
+type videoOutputStatus struct {
 	SequenceNumber uint16 `json:"sequenceNumber"`
 	Timestamp      uint32 `json:"timestamp"`
 	PacketsWritten uint64 `json:"packetsWritten"`
@@ -437,9 +559,19 @@ func GetStreamStatuses() []StreamStatus {
 				continue
 			}
 
+			videoOutputs := []videoOutputStatus{}
+			for _, videoOutput := range whepSession.videoOutputs {
+				videoOutputs = append(videoOutputs, videoOutputStatus{
+					SequenceNumber: videoOutput.sequenceNumber,
+					Timestamp:      videoOutput.timestamp,
+					PacketsWritten: videoOutput.packetsWritten,
+				})
+			}
+
 			whepSessions = append(whepSessions, whepSessionStatus{
 				ID:             id,
 				CurrentLayer:   currentLayer,
+				VideoOutputs:   videoOutputs,
 				SequenceNumber: whepSession.sequenceNumber,
 				Timestamp:      whepSession.timestamp,
 				PacketsWritten: whepSession.packetsWritten,
@@ -447,28 +579,59 @@ func GetStreamStatuses() []StreamStatus {
 		}
 		stream.whepSessionsLock.Unlock()
 
-		streamStatusVideo := []StreamStatusVideo{}
-		for _, videoTrack := range stream.videoTracks {
-			var lastKeyFrameSeen time.Time
-			if v, ok := videoTrack.lastKeyFrameSeen.Load().(time.Time); ok {
-				lastKeyFrameSeen = v
+		stream.sourceVideoTracksLock.Lock()
+		sourceStreamStatusVideo := []SourceStreamStatusVideo{}
+		for _, sourceVideoTrack := range stream.sourceVideoTracks {
+
+			rtpVideoStreams := []RTPStreamStatusVideo{}
+			for _, videoTrack := range sourceVideoTrack.rtpVideoTracks {
+				var lastKeyFrameSeen time.Time
+				if v, ok := videoTrack.lastKeyFrameSeen.Load().(time.Time); ok {
+					lastKeyFrameSeen = v
+				}
+
+				rtpVideoStreams = append(rtpVideoStreams, RTPStreamStatusVideo{
+					RID:              videoTrack.rid,
+					PacketsReceived:  videoTrack.packetsReceived.Load(),
+					LastKeyFrameSeen: lastKeyFrameSeen,
+				})
 			}
 
-			streamStatusVideo = append(streamStatusVideo, StreamStatusVideo{
-				RID:              videoTrack.rid,
-				PacketsReceived:  videoTrack.packetsReceived.Load(),
-				LastKeyFrameSeen: lastKeyFrameSeen,
+			sourceStreamStatusVideo = append(sourceStreamStatusVideo, SourceStreamStatusVideo{
+				ID:              sourceVideoTrack.streamId,
+				RTPVideoStreams: rtpVideoStreams,
 			})
 		}
+		stream.sourceVideoTracksLock.Unlock()
 
 		out = append(out, StreamStatus{
 			StreamKey:            streamKey,
 			FirstSeenEpoch:       stream.firstSeenEpoch,
 			AudioPacketsReceived: stream.audioPacketsReceived.Load(),
-			VideoStreams:         streamStatusVideo,
+			SourceVideoStreams:   sourceStreamStatusVideo,
 			WHEPSessions:         whepSessions,
 		})
 	}
 
 	return out
 }
+
+func (sC *socketConstraints) sendSocket(data interface{}) error {
+	sC.mu.Lock()
+	defer sC.mu.Unlock()
+
+	return sC.socket.WriteJSON(data)
+}
+
+//causes iceconnection to disconnect after some seconds
+//func (sC *socketConstraints) readSocket() ([]byte, error) {
+//	sC.mu.Lock()
+//	defer sC.mu.Unlock()
+//
+//	_, message, err := sC.socket.ReadMessage()
+//	if err != nil {
+//		return nil, err
+//	}
+//
+//	return message, nil
+//}

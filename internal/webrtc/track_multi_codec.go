@@ -1,6 +1,8 @@
 package webrtc
 
 import (
+	"log"
+
 	"github.com/pion/rtp"
 	"github.com/pion/webrtc/v4"
 )
@@ -15,6 +17,7 @@ type trackMultiCodec struct {
 }
 
 func (t *trackMultiCodec) Bind(ctx webrtc.TrackLocalContext) (webrtc.RTPCodecParameters, error) {
+	log.Println("Bind trackMultiCodec", t.streamID)
 	t.ssrc = ctx.SSRC()
 	t.writeStream = ctx.WriteStream()
 

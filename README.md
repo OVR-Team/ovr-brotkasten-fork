@@ -1,23 +1,23 @@
 # Broadcast Box
 
-[![License][license-image]][license-url]
-[![Discord][discord-image]][discord-invite-url]
+[ ![License](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[ ![Discord](https://img.shields.io/discord/1162823780708651018?logo=discord)](https://discord.gg/An5jjhNUE3)
 
-- [What is Broadcast Box](#what-is-broadcast-box)
-- [Using](#using)
-  - [Broadcasting](#broadcasting)
-  - [Broadcasting (GStreamer, CLI)](#broadcasting-gstreamer-cli)
-  - [Playback](#playback)
-- [Getting Started](#getting-started)
-  - [Configuring](#configuring)
-  - [Building From Source](#building-from-source)
-  - [Frontend](#frontend)
-  - [Backend](#backend)
-  - [Docker](#docker)
-  - [Docker Compose](#docker-compose)
-  - [Environment variables](#environment-variables)
-  - [Network Test on Start](#network-test-on-start)
-- [Design](#design)
+* [What is Broadcast Box](#what-is-broadcast-box)
+* [Using](#using)
+  * [Broadcasting](#broadcasting)
+  * [Broadcasting (GStreamer, CLI)](#broadcasting-gstreamer-cli)
+  * [Playback](#playback)
+* [Getting Started](#getting-started)
+  * [Configuring](#configuring)
+  * [Building From Source](#building-from-source)
+  * [Frontend](#frontend)
+  * [Backend](#backend)
+  * [Docker](#docker)
+  * [Docker Compose](#docker-compose)
+  * [Environment variables](#environment-variables)
+  * [Network Test on Start](#network-test-on-start)
+* [Design](#design)
 
 ## What is Broadcast Box
 
@@ -35,9 +35,7 @@ RTMP and HLS you get the fastest experience possible.
 ### Latest in Video Compression
 
 With WebRTC you get access to the latest in video codecs. With AV1 you can send
-the same video quality with a [50%][av1-practical-use-case] reduction in bandwidth required.
-
-[av1-practical-use-case]: https://engineering.fb.com/2018/04/10/video-engineering/av1-beats-x264-and-libvpx-vp9-in-practical-use-case/
+the same video quality with a [50%](https://engineering.fb.com/2018/04/10/video-engineering/av1-beats-x264-and-libvpx-vp9-in-practical-use-case/) reduction in bandwidth required.
 
 ### Broadcast all angles
 
@@ -72,12 +70,9 @@ NAT traversal begins.
 You could also use P2P to pull other broadcasters into your stream. No special configuration
 or servers required anymore to get sub-second co-streams.
 
-Broadcast Box acts as a [SFU][applied-webrtc-article]. This means that
+Broadcast Box acts as a [SFU](https://webrtcforthecurious.com/docs/08-applied-webrtc/#selective-forwarding-unit). This means that
 every client connects to Broadcast Box. No direct connection is established between broadcasters/viewers.
-If you want a direct connection between OBS and your browser see [OBS2Browser][obs-2-browser-repo].
-
-[applied-webrtc-article]: https://webrtcforthecurious.com/docs/08-applied-webrtc/#selective-forwarding-unit
-[obs-2-browser-repo]: https://github.com/Sean-Der/OBS2Browser
+If you want a direct connection between OBS and your browser see [OBS2Browser](https://github.com/Sean-Der/OBS2Browser).
 
 ## Using
 
@@ -91,19 +86,19 @@ You may use any Stream Key you like. The same stream key is used for broadcastin
 
 Go to `Settings -> Stream` and set the following values.
 
-- Service: WHIP
-- Server: <https://b.siobud.com/api/whip>
-- StreamKey: (Any Stream Key you like)
+* Service: WHIP
+* Server: <https://b.siobud.com/api/whip>
+* StreamKey: (Any Stream Key you like)
 
 Your settings page should look like this:
 
-![OBS Stream settings example](./.github/img/streamSettings.png)
+ ![OBS Stream settings example](./.github/img/streamSettings.png)
 
-OBS by default will have ~2 seconds of latency. If you want sub-second latency you can configure
+OBS by default will have \~2 seconds of latency. If you want sub-second latency you can configure
 this in `Settings -> Output`. Set your encoder to `x264` and set tune to `zerolatency`. Your Output
 page will look like this.
 
-![OBS Output settings example](./.github/img/outputPage.png)
+ ![OBS Output settings example](./.github/img/outputPage.png)
 
 When you are ready to broadcast press `Start Streaming` and now time to watch!
 
@@ -131,7 +126,7 @@ If you are broadcasting to the Stream Key `StreamTest` your video will be availa
 You can also go to the home page and enter `StreamTest`. The following is a screenshot of OBS broadcasting and
 the latency of 120 milliseconds observed.
 
-![Example have potential latency](./.github/img/broadcastView.png)
+ ![Example have potential latency](./.github/img/broadcastView.png)
 
 ## Getting Started
 
@@ -201,33 +196,27 @@ docker-compose up -d
 
 The backend can be configured with the following environment variables.
 
-- `DISABLE_STATUS` - Disable the status API
-- `DISABLE_FRONTEND` - Disable the serving of frontend. Only REST APIs + WebRTC is enabled.
-- `HTTP_ADDRESS` - HTTP Server Address
-- `NETWORK_TEST_ON_START` - When "true" on startup Broadcast Box will check network connectivity
-
-- `ENABLE_HTTP_REDIRECT` - HTTP traffic will be redirect to HTTPS
-- `SSL_CERT` - Path to SSL certificate if using Broadcast Box's HTTP Server
-- `SSL_KEY` - Path to SSL key if using Broadcast Box's HTTP Server
-
-- `NAT_1_TO_1_IP` - Announce IPs that don't belong to local machine (like Public IP). delineated by '|'
-- `INCLUDE_PUBLIC_IP_IN_NAT_1_TO_1_IP` - Like `NAT_1_TO_1_IP` but autoconfigured
-- `INTERFACE_FILTER` - Only use a certain interface for UDP traffic
-- `NAT_ICE_CANDIDATE_TYPE` - By default setting a NAT_1_TO_1_IP overrides. Set this to `srflx` to instead append IPs
-- `STUN_SERVERS` - List of STUN servers delineated by '|'. Useful if Broadcast Box is running behind a NAT
-- `INCLUDE_LOOPBACK_CANDIDATE` - Also listen for WebRTC traffic on loopback, disabled by default
-
-- `UDP_MUX_PORT_WHEP` - Like `UDP_MUX_PORT` but only for WHEP traffic
-- `UDP_MUX_PORT_WHIP` - Like `UDP_MUX_PORT` but only for WHIP traffic
-- `UDP_MUX_PORT` - Serve all UDP traffic via one port. By default Broadcast Box listens on a random port
-
-- `TCP_MUX_ADDRESS` - If you wish to make WebRTC traffic available via TCP.
-- `TCP_MUX_FORCE` - If you wish to make WebRTC traffic only available via TCP.
-
-- `APPEND_CANDIDATE` - Append candidates to Offer that ICE Agent did not generate. Worse version of `NAT_1_TO_1_IP`
-
-- `DEBUG_PRINT_OFFER` - Print WebRTC Offers from client to Broadcast Box. Debug things like accepted codecs.
-- `DEBUG_PRINT_ANSWER` - Print WebRTC Answers from Broadcast Box to Browser. Debug things like IP/Ports returned to client.
+* `DISABLE_STATUS` - Disable the status API
+* `DISABLE_FRONTEND` - Disable the serving of frontend. Only REST APIs + WebRTC is enabled.
+* `HTTP_ADDRESS` - HTTP Server Address
+* `NETWORK_TEST_ON_START` - When "true" on startup Broadcast Box will check network connectivity
+* `ENABLE_HTTP_REDIRECT` - HTTP traffic will be redirect to HTTPS
+* `SSL_CERT` - Path to SSL certificate if using Broadcast Box's HTTP Server
+* `SSL_KEY` - Path to SSL key if using Broadcast Box's HTTP Server
+* `NAT_1_TO_1_IP` - Announce IPs that don't belong to local machine (like Public IP). delineated by '|'
+* `INCLUDE_PUBLIC_IP_IN_NAT_1_TO_1_IP` - Like `NAT_1_TO_1_IP` but autoconfigured
+* `INTERFACE_FILTER` - Only use a certain interface for UDP traffic
+* `NAT_ICE_CANDIDATE_TYPE` - By default setting a NAT_1_TO_1_IP overrides. Set this to `srflx` to instead append IPs
+* `STUN_SERVERS` - List of STUN servers delineated by '|'. Useful if Broadcast Box is running behind a NAT
+* `INCLUDE_LOOPBACK_CANDIDATE` - Also listen for WebRTC traffic on loopback, disabled by default
+* `UDP_MUX_PORT_WHEP` - Like `UDP_MUX_PORT` but only for WHEP traffic
+* `UDP_MUX_PORT_WHIP` - Like `UDP_MUX_PORT` but only for WHIP traffic
+* `UDP_MUX_PORT` - Serve all UDP traffic via one port. By default Broadcast Box listens on a random port
+* `TCP_MUX_ADDRESS` - If you wish to make WebRTC traffic available via TCP.
+* `TCP_MUX_FORCE` - If you wish to make WebRTC traffic only available via TCP.
+* `APPEND_CANDIDATE` - Append candidates to Offer that ICE Agent did not generate. Worse version of `NAT_1_TO_1_IP`
+* `DEBUG_PRINT_OFFER` - Print WebRTC Offers from client to Broadcast Box. Debug things like accepted codecs.
+* `DEBUG_PRINT_ANSWER` - Print WebRTC Answers from Broadcast Box to Browser. Debug things like IP/Ports returned to client.
 
 ## Network Test on Start
 
@@ -256,11 +245,11 @@ Network Test client reported nothing in 30 seconds
 Please see the README and join Discord for help
 ```
 
-[Join the Discord][discord-invite-url] and we are ready to help! To debug check the following.
+[Join the Discord](https://discord.gg/An5jjhNUE3) and we are ready to help! To debug check the following.
 
-- Have you allowed UDP traffic?
-- Do you have any restrictions on ports?
-- Is your server publicly accessible?
+* Have you allowed UDP traffic?
+* Do you have any restrictions on ports?
+* Is your server publicly accessible?
 
 If you wish to disable the test set the environment variable `NETWORK_TEST_ON_START` to false.
 
@@ -268,11 +257,8 @@ If you wish to disable the test set the environment variable `NETWORK_TEST_ON_ST
 
 The backend exposes three endpoints (the status page is optional, if hosting locally).
 
-- `/api/whip` - Start a WHIP Session. WHIP broadcasts video via WebRTC.
-- `/api/whep` - Start a WHEP Session. WHEP is video playback via WebRTC.
-- `/api/status` - Status of the all active WHIP streams
+* `/api/whip` - Start a WHIP Session. WHIP broadcasts video via WebRTC.
+* `/api/whep` - Start a WHEP Session. WHEP is video playback via WebRTC.
+* `/api/status` - Status of the all active WHIP streams
 
-[license-image]: https://img.shields.io/badge/License-MIT-yellow.svg
-[license-url]: https://opensource.org/licenses/MIT
-[discord-image]: https://img.shields.io/discord/1162823780708651018?logo=discord
-[discord-invite-url]: https://discord.gg/An5jjhNUE3
+

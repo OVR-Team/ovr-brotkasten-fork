@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path"
 	"path/filepath"
@@ -14,23 +13,29 @@ import (
 
 	"crypto/tls"
 	"log"
+	"net"
 	"net/http"
 
-	"github.com/glimesh/broadcast-box/internal/networktest"
-	"github.com/glimesh/broadcast-box/internal/webrtc"
+	"broadcast-box/internal/networktest"
+	"broadcast-box/internal/webrtc"
+
+	"github.com/gorilla/websocket"
 	"github.com/joho/godotenv"
+
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 const (
-	envFileProd = ".env.production"
-	envFileDev  = ".env.development"
+	envFileProd  = ".env.production"
+	envFileDev   = ".env.development"
+	envFileLocal = ".env.localhost"
 
 	networkTestIntroMessage   = "\033[0;33mNETWORK_TEST_ON_START is enabled. If the test fails Broadcast Box will exit.\nSee the README for how to debug or disable NETWORK_TEST_ON_START\033[0m"
 	networkTestSuccessMessage = "\033[0;32mNetwork Test passed.\nHave fun using Broadcast Box.\033[0m"
 	networkTestFailedMessage  = "\033[0;31mNetwork Test failed.\n%s\nPlease see the README and join Discord for help\033[0m"
 )
 
-var noBuildDirectoryErr = errors.New("\033[0;31mBuild directory does not exist, run `npm install` and `npm run build` in the web directory.\033[0m")
+var errorFoo = errors.New("\033[0;31mBuild directory does not exist, run `npm install` and `npm run build` in the web directory.\033[0m")
 
 type (
 	whepLayerRequestJSON struct {
@@ -38,6 +43,40 @@ type (
 		EncodingId string `json:"encodingId"`
 	}
 )
+
+var upgrader = websocket.Upgrader{
+	ReadBufferSize:  1024,
+	WriteBufferSize: 1024,
+	CheckOrigin: func(r *http.Request) bool {
+		return true
+	},
+}
+
+// useful links:
+// https://stackoverflow.com/questions/27410764/dial-with-a-specific-address-interface-golang
+// https://stackoverflow.com/questions/22751035/golang-distinguish-ipv4-ipv6
+func GetInterfaceIpv4Addr(interfaceName string) (addr string, err error) {
+	var (
+		ief      *net.Interface
+		addrs    []net.Addr
+		ipv4Addr net.IP
+	)
+	if ief, err = net.InterfaceByName(interfaceName); err != nil { // get interface
+		return
+	}
+	if addrs, err = ief.Addrs(); err != nil { // get addresses
+		return
+	}
+	for _, addr := range addrs { // get ipv4 address
+		if ipv4Addr = addr.(*net.IPNet).IP.To4(); ipv4Addr != nil {
+			break
+		}
+	}
+	if ipv4Addr == nil {
+		return "", fmt.Errorf("interface %s don't have an ipv4 address", interfaceName)
+	}
+	return ipv4Addr.String(), nil
+}
 
 func logHTTPError(w http.ResponseWriter, err string, code int) {
 	log.Println(err)
@@ -56,73 +95,63 @@ func extractBearerToken(authHeader string) (string, bool) {
 	return "", false
 }
 
-func whipHandler(res http.ResponseWriter, r *http.Request) {
+func whipConnectHandler(w http.ResponseWriter, r *http.Request) {
+	log.Println("whipConnectHandler(w: ", w, "r: ", r, ")")
+
 	if r.Method == "DELETE" {
 		return
 	}
 
+	log.Println("whipConnectHandler: before Upgrade")
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Println(err.Error())
+		return
+	}
+	log.Println("whipConnectHandler: after Upgrade")
+
 	streamKeyHeader := r.Header.Get("Authorization")
 	if streamKeyHeader == "" {
-		logHTTPError(res, "Authorization was not set", http.StatusBadRequest)
+		logHTTPError(w, "Authorization was not set", http.StatusBadRequest)
 		return
 	}
 
 	streamKey, ok := extractBearerToken(streamKeyHeader)
 	if !ok || !validateStreamKey(streamKey) {
-		logHTTPError(res, "Invalid stream key format", http.StatusBadRequest)
+		logHTTPError(w, "Invalid stream key format", http.StatusBadRequest)
 		return
 	}
 
-	offer, err := io.ReadAll(r.Body)
-	if err != nil {
-		logHTTPError(res, err.Error(), http.StatusBadRequest)
-		return
-	}
-
-	answer, err := webrtc.WHIP(string(offer), streamKey)
-	if err != nil {
-		logHTTPError(res, err.Error(), http.StatusBadRequest)
-		return
-	}
-
-	res.Header().Add("Location", "/api/whip")
-	res.Header().Add("Content-Type", "application/sdp")
-	res.WriteHeader(http.StatusCreated)
-	fmt.Fprint(res, answer)
+	webrtc.WHIPCreate(streamKey, conn)
 }
 
-func whepHandler(res http.ResponseWriter, req *http.Request) {
-	streamKeyHeader := req.Header.Get("Authorization")
+func whepConnectHandler(w http.ResponseWriter, r *http.Request) {
+	log.Println("whepConnectHandler(w: ", w, "r: ", r, ")")
+	log.Println("whepConnectHandler")
+
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Println(err.Error())
+		return
+	}
+
+	log.Println("whepConnectHandler: request", r)
+
+	streamKeyHeader := r.Header.Get("Authorization")
 	if streamKeyHeader == "" {
-		logHTTPError(res, "Authorization was not set", http.StatusBadRequest)
+		logHTTPError(w, "Authorization was not set", http.StatusBadRequest)
 		return
 	}
 
 	streamKey, ok := extractBearerToken(streamKeyHeader)
 	if !ok || !validateStreamKey(streamKey) {
-		logHTTPError(res, "Invalid stream key format", http.StatusBadRequest)
+		logHTTPError(w, "Invalid stream key format", http.StatusBadRequest)
 		return
 	}
 
-	offer, err := io.ReadAll(req.Body)
-	if err != nil {
-		logHTTPError(res, err.Error(), http.StatusBadRequest)
-		return
-	}
-
-	answer, whepSessionId, err := webrtc.WHEP(string(offer), streamKey)
-	if err != nil {
-		logHTTPError(res, err.Error(), http.StatusBadRequest)
-		return
-	}
-
-	apiPath := req.Host + strings.TrimSuffix(req.URL.RequestURI(), "whep")
-	res.Header().Add("Link", `<`+apiPath+"sse/"+whepSessionId+`>; rel="urn:ietf:params:whep:ext:core:server-sent-events"; events="layers"`)
-	res.Header().Add("Link", `<`+apiPath+"layer/"+whepSessionId+`>; rel="urn:ietf:params:whep:ext:core:layer"`)
-	res.Header().Add("Location", "/api/whep")
-	res.Header().Add("Content-Type", "application/sdp")
-	res.WriteHeader(http.StatusCreated)
-	fmt.Fprint(res, answer)
+	log.Println("whepConnectHandler: before calling WHEPCreate", streamKey, conn)
+	webrtc.WHEPCreate(streamKey, conn)
+	log.Println("whepConnectHandler: after calling WHEPCreate")
 }
 
 func whepServerSentEventsHandler(res http.ResponseWriter, req *http.Request) {
@@ -196,10 +225,19 @@ func corsHandler(next func(w http.ResponseWriter, r *http.Request)) http.Handler
 }
 
 func main() {
+	var ipv4Addr, err = GetInterfaceIpv4Addr("eth0")
+	if err != nil {
+		log.Println("ipv4 err: ", err)
+	}
+
 	loadConfigs := func() error {
+		log.Println("Loading configs", os.Getenv("APP_ENV"))
 		if os.Getenv("APP_ENV") == "development" {
 			log.Println("Loading `" + envFileDev + "`")
 			return godotenv.Load(envFileDev)
+		} else if os.Getenv("APP_ENV") == "localhost" {
+			log.Println("Loading `" + envFileLocal + "`")
+			return godotenv.Load(envFileLocal)
 		} else {
 			log.Println("Loading `" + envFileProd + "`")
 			if err := godotenv.Load(envFileProd); err != nil {
@@ -207,7 +245,7 @@ func main() {
 			}
 
 			if _, err := os.Stat("./web/build"); os.IsNotExist(err) && os.Getenv("DISABLE_FRONTEND") == "" {
-				return noBuildDirectoryErr
+				return errorFoo
 			}
 
 			return nil
@@ -239,7 +277,7 @@ func main() {
 		go func() {
 			time.Sleep(time.Second * 5)
 
-			if networkTestErr := networktest.Run(whepHandler); networkTestErr != nil {
+			if networkTestErr := networktest.Run(whepConnectHandler); networkTestErr != nil {
 				fmt.Printf(networkTestFailedMessage, networkTestErr.Error())
 				os.Exit(1)
 			} else {
@@ -272,10 +310,14 @@ func main() {
 	if os.Getenv("DISABLE_FRONTEND") == "" {
 		mux.Handle("/", indexHTMLWhenNotFound(http.Dir("./web/build")))
 	}
-	mux.HandleFunc("/api/whip", corsHandler(whipHandler))
-	mux.HandleFunc("/api/whep", corsHandler(whepHandler))
+	mux.HandleFunc("/api/whip/connect", whipConnectHandler)
+	mux.HandleFunc("/api/whep/connect", whepConnectHandler)
 	mux.HandleFunc("/api/sse/", corsHandler(whepServerSentEventsHandler))
 	mux.HandleFunc("/api/layer/", corsHandler(whepLayerHandler))
+
+	// Prometheus metrics, https://prometheus.io/docs/guides/go-application/
+
+	http.Handle("/metrics", promhttp.Handler())
 
 	if os.Getenv("DISABLE_STATUS") == "" {
 		mux.HandleFunc("/api/status", corsHandler(statusHandler))
@@ -283,7 +325,7 @@ func main() {
 
 	server := &http.Server{
 		Handler: mux,
-		Addr:    os.Getenv("HTTP_ADDRESS"),
+		Addr:    ipv4Addr + os.Getenv("HTTP_ADDRESS"),
 	}
 
 	tlsKey := os.Getenv("SSL_KEY")
@@ -301,10 +343,10 @@ func main() {
 
 		server.TLSConfig.Certificates = append(server.TLSConfig.Certificates, cert)
 
-		log.Println("Running HTTPS Server at `" + os.Getenv("HTTP_ADDRESS") + "`")
+		log.Println("Running HTTPS Server at `" + ipv4Addr + os.Getenv("HTTP_ADDRESS") + "`")
 		log.Fatal(server.ListenAndServeTLS("", ""))
 	} else {
-		log.Println("Running HTTP Server at `" + os.Getenv("HTTP_ADDRESS") + "`")
+		log.Println("Running HTTP Server at `" + ipv4Addr + os.Getenv("HTTP_ADDRESS") + "`")
 		log.Fatal(server.ListenAndServe())
 	}
 
